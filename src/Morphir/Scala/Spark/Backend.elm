@@ -17,6 +17,7 @@ import Morphir.Scala.Feature.Core exposing (mapValue)
 import Morphir.Scala.PrettyPrinter as PrettyPrinter
 import Morphir.Spark.API as Spark
 import Set
+import Morphir.Spark.API exposing (DataFrameApi)
 
 
 type alias Options =
@@ -61,7 +62,7 @@ mapDistribution opt distro =
                                             |> Dict.toList
                                             |> List.filterMap
                                                 (\( valueName, _ ) ->
-                                                    case mapFunctionDefinition ir ( packageName, moduleName, valueName ) of
+                                                    case mapFunctionDefinition Spark.sparkApi ir ( packageName, moduleName, valueName ) of
                                                         Ok memberDecl ->
                                                             Just (Scala.withoutAnnotation memberDecl)
 
@@ -91,8 +92,8 @@ mapDistribution opt distro =
                 |> Dict.fromList
 
 
-mapFunctionDefinition : IR -> FQName -> Result Error Scala.MemberDecl
-mapFunctionDefinition ir (( _, _, localFunctionName ) as fullyQualifiedFunctionName) =
+mapFunctionDefinition : DataFrameApi -> IR -> FQName -> Result Error Scala.MemberDecl
+mapFunctionDefinition dataFrameApi ir (( _, _, localFunctionName ) as fullyQualifiedFunctionName) =
     let
         mapFunctionInputs : List ( Name, va, Type () ) -> Result Error (List Scala.ArgDecl)
         mapFunctionInputs inputTypes =
@@ -103,7 +104,7 @@ mapFunctionDefinition ir (( _, _, localFunctionName ) as fullyQualifiedFunctionN
                             Type.Reference _ ( [ [ "morphir" ], [ "s", "d", "k" ] ], [ [ "list" ] ], [ "list" ] ) [ itemType ] ->
                                 Ok
                                     { modifiers = []
-                                    , tpe = Spark.dataFrame
+                                    , tpe = dataFrameApi.dataFrame
                                     , name = Name.toCamelCase argName
                                     , defaultValue = Nothing
                                     }
@@ -118,7 +119,7 @@ mapFunctionDefinition ir (( _, _, localFunctionName ) as fullyQualifiedFunctionN
             body
                 |> RelationalBackend.mapFunctionBody
                 |> Result.mapError RelationalBackendError
-                |> Result.andThen mapRelation
+                |> Result.andThen (mapRelation dataFrameApi)
     in
     ir
         |> IR.lookupValueDefinition fullyQualifiedFunctionName
@@ -132,7 +133,7 @@ mapFunctionDefinition ir (( _, _, localFunctionName ) as fullyQualifiedFunctionN
                             , name = localFunctionName |> Name.toCamelCase
                             , typeArgs = []
                             , args = [ scalaArgs ]
-                            , returnType = Just Spark.dataFrame
+                            , returnType = Just dataFrameApi.dataFrame
                             , body = Just scalaFunctionBody
                             }
                     )
@@ -141,8 +142,8 @@ mapFunctionDefinition ir (( _, _, localFunctionName ) as fullyQualifiedFunctionN
             )
 
 
-mapRelation : Relation -> Result Error Scala.Value
-mapRelation relation =
+mapRelation : DataFrameApi -> Relation -> Result Error Scala.Value
+mapRelation dataFrameApi relation =
     case relation of
         Values values ->
             Debug.todo "not implemented yet"
@@ -153,24 +154,24 @@ mapRelation relation =
         Where predicate sourceRelation ->
             case predicate of
                 Value.Lambda _ _ body ->
-                    mapRelation sourceRelation
+                    mapRelation dataFrameApi sourceRelation
                         |> Result.map
-                            (Spark.filter
-                                (mapColumnExpression body)
+                            (dataFrameApi.filter
+                                (mapColumnExpression dataFrameApi body)
                             )
 
                 _ ->
                     Err (LambdaExpected predicate)
 
         Select columns sourceRelation ->
-            mapRelation sourceRelation
+            mapRelation dataFrameApi sourceRelation
                 |> Result.map
-                    (Spark.select
+                    (dataFrameApi.select
                         (columns
                             |> List.map
                                 (\( columnName, columnValue ) ->
-                                    mapColumnExpression columnValue
-                                        |> Spark.alias (Name.toCamelCase columnName)
+                                    mapColumnExpression dataFrameApi columnValue
+                                        |> dataFrameApi.alias (Name.toCamelCase columnName)
                                 )
                         )
                     )
@@ -178,8 +179,8 @@ mapRelation relation =
         Join joinType predicate leftRelation rightRelation ->
             Result.map2
                 (\left right ->
-                    Spark.join right
-                        (mapColumnExpression predicate)
+                    dataFrameApi.join right
+                        (mapColumnExpression dataFrameApi predicate)
                         (case joinType of
                             Inner ->
                                 "inner"
@@ -195,12 +196,12 @@ mapRelation relation =
                         )
                         left
                 )
-                (mapRelation leftRelation)
-                (mapRelation rightRelation)
+                (mapRelation dataFrameApi leftRelation)
+                (mapRelation dataFrameApi rightRelation)
 
 
-mapColumnExpression : TypedValue -> Scala.Value
-mapColumnExpression value =
+mapColumnExpression : DataFrameApi -> TypedValue -> Scala.Value
+mapColumnExpression dataFrameApi value =
     let
         default v =
             mapValue Set.empty v
@@ -228,15 +229,15 @@ mapColumnExpression value =
     in
     case value of
         Value.Literal _ lit ->
-            Spark.literal (Scala.Literal (mapLiteral lit))
+            dataFrameApi.literal (Scala.Literal (mapLiteral lit))
 
         Value.Field _ _ name ->
-            Spark.column (Name.toCamelCase name)
+            dataFrameApi.column (Name.toCamelCase name)
 
         Value.Apply _ (Value.Apply _ (Value.Reference _ fqn) arg1) arg2 ->
             case FQName.toString fqn of
                 "Morphir.SDK:Basics:equal" ->
-                    Scala.BinOp (mapColumnExpression arg1) "===" (mapColumnExpression arg2)
+                    Scala.BinOp (mapColumnExpression dataFrameApi arg1) "===" (mapColumnExpression dataFrameApi arg2)
 
                 _ ->
                     default value
@@ -260,25 +261,25 @@ mapColumnExpression value =
                 toScala ( cases, otherwise ) soFar =
                     case cases of
                         [] ->
-                            Spark.otherwise (mapColumnExpression otherwise) soFar
+                            dataFrameApi.otherwise (mapColumnExpression dataFrameApi otherwise) soFar
 
                         ( headCond, headBranch ) :: tailCases ->
                             toScala ( tailCases, otherwise )
-                                (Spark.andWhen
-                                    (mapColumnExpression headCond)
-                                    (mapColumnExpression headBranch)
+                                (dataFrameApi.andWhen
+                                    (mapColumnExpression dataFrameApi headCond)
+                                    (mapColumnExpression dataFrameApi headBranch)
                                     soFar
                                 )
             in
             case value |> toIfElseChain of
                 ( [], otherwise ) ->
-                    mapColumnExpression otherwise
+                    mapColumnExpression dataFrameApi otherwise
 
                 ( ( firstCond, firstBranch ) :: otherCases, otherwise ) ->
                     toScala ( otherCases, otherwise )
-                        (Spark.when
-                            (mapColumnExpression firstCond)
-                            (mapColumnExpression firstBranch)
+                        (dataFrameApi.when
+                            (mapColumnExpression dataFrameApi firstCond)
+                            (mapColumnExpression dataFrameApi firstBranch)
                         )
 
         _ ->

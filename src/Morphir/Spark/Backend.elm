@@ -49,6 +49,7 @@ import Morphir.Scala.Feature.Core as ScalaBackend
 import Morphir.Scala.PrettyPrinter as PrettyPrinter
 import Morphir.Spark.API as Spark
 import Morphir.Spark.AST as SparkAST exposing (..)
+import Morphir.Spark.Expression exposing (..)
 
 
 type alias Options =
@@ -99,7 +100,7 @@ mapDistribution _ distro =
                                             |> Dict.toList
                                             |> List.filterMap
                                                 (\( valueName, _ ) ->
-                                                    case mapFunctionDefinition ir ( packageName, moduleName, valueName ) of
+                                                    case mapFunctionDefinition Spark.sparkApi ir ( packageName, moduleName, valueName ) of
                                                         Ok memberDecl ->
                                                             Just (Scala.withoutAnnotation memberDecl)
 
@@ -208,8 +209,8 @@ mapEnumToLiteral value =
 
 {-| Maps function definitions defined within the current package to scala
 -}
-mapFunctionDefinition : IR -> FQName -> Result Error Scala.MemberDecl
-mapFunctionDefinition ir (( _, _, localFunctionName ) as fullyQualifiedFunctionName) =
+mapFunctionDefinition : Spark.DataFrameApi -> IR -> FQName -> Result Error Scala.MemberDecl
+mapFunctionDefinition dataFrameApi ir (( _, _, localFunctionName ) as fullyQualifiedFunctionName) =
     let
         mapFunctionInputs : List ( Name, va, Type () ) -> Result Error (List Scala.ArgDecl)
         mapFunctionInputs inputTypes =
@@ -220,7 +221,7 @@ mapFunctionDefinition ir (( _, _, localFunctionName ) as fullyQualifiedFunctionN
                             Type.Reference _ ( [ [ "morphir" ], [ "s", "d", "k" ] ], [ [ "list" ] ], [ "list" ] ) [ _ ] ->
                                 Ok
                                     { modifiers = []
-                                    , tpe = Spark.dataFrame
+                                    , tpe = dataFrameApi.dataFrame
                                     , name = Name.toCamelCase argName
                                     , defaultValue = Nothing
                                     }
@@ -242,56 +243,56 @@ mapFunctionDefinition ir (( _, _, localFunctionName ) as fullyQualifiedFunctionN
                             , name = localFunctionName |> Name.toCamelCase
                             , typeArgs = []
                             , args = [ scalaArgs ]
-                            , returnType = Just Spark.dataFrame
+                            , returnType = Just dataFrameApi.dataFrame
                             , body = Just scalaFunctionBody
                             }
                     )
                     (mapFunctionInputs functionDef.inputTypes)
-                    (mapValue ir functionDef.body)
+                    (mapValue dataFrameApi ir functionDef.body)
             )
 
 
 {-| Maps morphir values to scala values
 -}
-mapValue : IR -> TypedValue -> Result Error Scala.Value
-mapValue ir body =
+mapValue : Spark.DataFrameApi -> IR -> TypedValue -> Result Error Scala.Value
+mapValue dataFrameApi ir body =
     body
-        |> SparkAST.objectExpressionFromValue ir
+        |> SparkAST.objectExpressionFromValue dataFrameApi ir
         |> Result.mapError MappingError
-        |> Result.andThen mapObjectExpressionToScala
+        |> Result.andThen (mapObjectExpressionToScala dataFrameApi)
 
 
 {-| Maps Spark ObjectExpressions to scala values.
 ObjectExpressions are defined as part of the SparkIR
 -}
-mapObjectExpressionToScala : ObjectExpression -> Result Error Scala.Value
-mapObjectExpressionToScala objectExpression =
+mapObjectExpressionToScala : Spark.DataFrameApi -> ObjectExpression -> Result Error Scala.Value
+mapObjectExpressionToScala dataFrameApi objectExpression =
     case objectExpression of
         From name ->
             Name.toCamelCase name |> Scala.Variable |> Ok
 
         Filter predicate sourceRelation ->
-            mapObjectExpressionToScala sourceRelation
+            mapObjectExpressionToScala dataFrameApi sourceRelation
                 |> Result.map
-                    (Spark.filter
-                        (mapExpression predicate)
+                    (dataFrameApi.filter
+                        (mapExpression dataFrameApi predicate)
                     )
 
         Select fieldExpressions sourceRelation ->
-            mapObjectExpressionToScala sourceRelation
+            mapObjectExpressionToScala dataFrameApi sourceRelation
                 |> Result.map
-                    (Spark.select
+                    (dataFrameApi.select
                         (fieldExpressions
-                            |> mapNamedExpressions
+                            |> (mapNamedExpressions dataFrameApi)
                         )
                     )
 
         Aggregate groupfield fieldExpressions sourceRelation ->
-            mapObjectExpressionToScala sourceRelation
+            mapObjectExpressionToScala dataFrameApi sourceRelation
                 |> Result.map
-                    (Spark.aggregate
+                    (dataFrameApi.aggregate
                         groupfield
-                        (mapNamedExpressions fieldExpressions)
+                        (mapNamedExpressions dataFrameApi fieldExpressions)
                     )
 
         Join joinType baseRelation joinedRelation onClause ->
@@ -307,30 +308,30 @@ mapObjectExpressionToScala objectExpression =
             in
             Result.map2
                 (\baseDataFrame joinedDataFrame ->
-                    Spark.join
+                    dataFrameApi.join
                         baseDataFrame
-                        (mapExpression onClause)
+                        (mapExpression dataFrameApi onClause)
                         joinTypeName
                         joinedDataFrame
                 )
-                (mapObjectExpressionToScala baseRelation)
-                (mapObjectExpressionToScala joinedRelation)
+                (mapObjectExpressionToScala dataFrameApi baseRelation)
+                (mapObjectExpressionToScala dataFrameApi joinedRelation)
 
 
 {-| Maps Spark Expressions to scala values.
 Expressions are defined as part of the SparkIR.
 -}
-mapExpression : Expression -> Scala.Value
-mapExpression expression =
+mapExpression : Spark.DataFrameApi -> Expression -> Scala.Value
+mapExpression dataFrameApi expression =
     case expression of
         BinaryOperation simpleExpression leftExpr rightExpr ->
             Scala.BinOp
-                (mapExpression leftExpr)
+                (mapExpression dataFrameApi leftExpr)
                 simpleExpression
-                (mapExpression rightExpr)
+                (mapExpression dataFrameApi rightExpr)
 
         Column colName ->
-            Spark.column colName
+            dataFrameApi.column colName
 
         Literal literal ->
             mapLiteral literal |> Scala.Literal
@@ -344,47 +345,55 @@ mapExpression expression =
                 toIfElseChain v branchesSoFar =
                     case v of
                         WhenOtherwise cond nextThenBranch nextElseBranch ->
-                            Spark.andWhen
-                                (mapExpression cond)
-                                (mapExpression nextThenBranch)
+                            dataFrameApi.andWhen
+                                (mapExpression dataFrameApi cond)
+                                (mapExpression dataFrameApi nextThenBranch)
                                 branchesSoFar
                                 |> toIfElseChain nextElseBranch
 
                         _ ->
-                            Spark.otherwise
-                                (mapExpression v)
+                            dataFrameApi.otherwise
+                                (mapExpression dataFrameApi v)
                                 branchesSoFar
             in
-            Spark.when
-                (mapExpression condition)
-                (mapExpression thenBranch)
+            dataFrameApi.when
+                (mapExpression dataFrameApi condition)
+                (mapExpression dataFrameApi thenBranch)
                 |> toIfElseChain elseBranch
 
         Method target name argList ->
             Scala.Apply
-                (Scala.Select (mapExpression target) name)
+                (Scala.Select (mapExpression dataFrameApi target) name)
                 (argList
-                    |> List.map mapExpression
+                    |> List.map (mapExpression dataFrameApi)
                     |> List.map (Scala.ArgValue Nothing)
                 )
 
         Function name argList ->
             Scala.Apply
-                (Scala.Ref [ "org", "apache", "spark", "sql", "functions" ] name)
+                (mapFunctionName dataFrameApi name)
                 (argList
-                    |> List.map mapExpression
+                    |> List.map (mapExpression dataFrameApi)
                     |> List.map (Scala.ArgValue Nothing)
                 )
+
+mapFunctionName : Spark.DataFrameApi -> String -> Scala.Value
+mapFunctionName dataFrameApi name =
+    case name of
+        "Seq" ->
+            Scala.Variable "Seq"
+        _ ->
+            (Scala.Ref dataFrameApi.functionsNamespace name)
 
 
 {-| Maps NamedExpressions to scala values.
 -}
-mapNamedExpressions : NamedExpressions -> List Scala.Value
-mapNamedExpressions nameExpressions =
+mapNamedExpressions : Spark.DataFrameApi -> NamedExpressions -> List Scala.Value
+mapNamedExpressions dataFrameApi nameExpressions =
     List.map
         (\( columnName, named ) ->
-            mapExpression named
-                |> Spark.alias (Name.toCamelCase columnName)
+            mapExpression dataFrameApi named
+                |> dataFrameApi.alias (Name.toCamelCase columnName)
         )
         nameExpressions
 

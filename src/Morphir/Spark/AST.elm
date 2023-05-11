@@ -16,7 +16,7 @@
 
 
 module Morphir.Spark.AST exposing
-    ( ObjectExpression(..), JoinType(..), Expression(..), DataFrame
+    ( ObjectExpression(..), JoinType(..),  DataFrame
     , objectExpressionFromValue
     , Error, NamedExpressions
     )
@@ -46,6 +46,8 @@ import Morphir.IR.Type as Type
 import Morphir.IR.Value as Value exposing (Pattern(..), TypedValue)
 import Morphir.SDK.Aggregate exposing (AggregateValue(..), AggregationCall(..), ConstructAggregationError, constructAggregationCall)
 import Morphir.SDK.ResultList as ResultList
+import Morphir.Spark.Expression exposing (..)
+import Morphir.Spark.API exposing (DataFrameApi)
 
 
 {-| An ObjectExpression represents a transformation that is applied directly to a Spark Data Frame.
@@ -172,44 +174,6 @@ correlateVariableToObjectName argPattern joinHierarchy =
             Dict.empty
 
 
-{-| An Expression represents an column expression.
-Expressions produce a value that is usually of type `Column` in spark. ,
-An Expression could take in a `Column` type or `Any` type as input and also produce a Column type and for this reason,
-Expression is expressed as a recursive type.
-
-These are the supported Expressions:
-
-  - **Column**
-      - Specifies the name of a column in a DataFrame similar to the `col("name")` in spark
-  - **Literal**
-      - Represents a literal value like `1`, `"Hello"`, `2.3`.
-  - **Variable**
-      - Represents a variable name like `param`.
-  - **BinaryOperation**
-      - BinaryOperations represent binary operations like `1 + 2`.
-      - The three arguments are: the operator, the left hand side expression, and the right hand side expression
-  - **WhenOtherwise**
-      - Represent a `when(expression, result).otherwise(expression, result)` in spark.
-      - It maps directly to an IfElse statement and can be chained.
-      - The three arguments are: the condition, the Then expression evaluated if the condition passes, and the Else expression.
-  - **Method**
-      - Applies a list of arguments on a method to a target instance.
-      - The three arguments are: An expression denoting the target instance, the name of the method to invoke, and a list of arguments to invoke the method with
-  - **Function**
-      - Applies a list of arguments on a function.
-      - The two arguments are: The fully qualified name of the function to invoke, and a list of arguments to invoke the function with
-
--}
-type Expression
-    = Column String
-    | Literal Literal
-    | Variable String
-    | BinaryOperation String Expression Expression
-    | WhenOtherwise Expression Expression Expression
-    | Method Expression String (List Expression)
-    | Function String (List Expression)
-
-
 {-| A List of (Name, Expression) where each Name represents an alias for a column expression,
 and the Expression is a column expression like `col(name)` within spark that gets aliased.
 -}
@@ -266,8 +230,8 @@ appendFunctionToSelect funcName sourceExpression =
             Err (UnhandledObjectExpression other)
 
 
-mergeSelects : List ObjectExpression -> Result Error ObjectExpression
-mergeSelects expressions =
+mergeSelects : DataFrameApi -> List ObjectExpression -> Result Error ObjectExpression
+mergeSelects dataFrameApi expressions =
     let
         collectNamedExpressions : Result Error NamedExpressions
         collectNamedExpressions =
@@ -280,7 +244,7 @@ mergeSelects expressions =
                             Select [(exprName, Function funcName [funcArg])] (Filter filterExpression (From _)) ->
                                 -- i.e. `source.filter(...).select(...)` into `source.select(...)`
                                 Ok ( exprName
-                                , Function funcName [ Function "when" [ filterExpression, funcArg ] ]
+                                , Function funcName [  dataFrameApi.whenExpression [ filterExpression, funcArg ] ]
                                 )
 
 
@@ -350,8 +314,8 @@ substituteOnlyFieldName fieldName sourceExpression =
 This is where support for various top level expression is added. This function fails to produce an ObjectExpression
 when it encounters a value that is not supported.
 -}
-objectExpressionFromValue : IR -> TypedValue -> Result Error ObjectExpression
-objectExpressionFromValue ir morphirValue =
+objectExpressionFromValue : DataFrameApi -> IR -> TypedValue -> Result Error ObjectExpression
+objectExpressionFromValue dataFrameApi ir morphirValue =
     case morphirValue of
         Value.Variable _ varName ->
             From varName |> Ok
@@ -359,41 +323,41 @@ objectExpressionFromValue ir morphirValue =
         Value.Apply _ (Value.Apply _ (Value.Reference _ ( [ [ "morphir" ], [ "s", "d", "k" ] ], [ [ "aggregate" ] ], [ "aggregate" ] )) aggregateBody) (Value.Apply _ (Value.Apply _ (Value.Reference _ ( [ [ "morphir" ], [ "s", "d", "k" ] ], [ [ "aggregate" ] ], [ "group", "by" ] )) groupKey) sourceRelation) ->
             constructAggregationCall aggregateBody groupKey sourceRelation
                 |> Result.mapError AggregationError
-                |> Result.andThen (objectExpressionFromAggregationCall ir)
+                |> Result.andThen (objectExpressionFromAggregationCall dataFrameApi ir)
 
         Value.Apply _ (Value.Apply _ (Value.Reference _ ( [ [ "morphir" ], [ "s", "d", "k" ] ], [ [ "list" ] ], [ "filter" ] )) predicate) sourceRelation ->
-            objectExpressionFromValue ir sourceRelation
+            objectExpressionFromValue dataFrameApi ir sourceRelation
                 |> Result.andThen
                     (\source ->
-                        expressionFromValue ir predicate
+                        expressionFromValue dataFrameApi ir predicate
                             |> Result.map (\fieldExp -> Filter fieldExp source)
                     )
 
         Value.Apply _ (Value.Apply _ (Value.Reference _ ( [ [ "morphir" ], [ "s", "d", "k" ] ], [ [ "list" ] ], [ "map" ] )) mappingFunction) sourceRelation ->
-            objectExpressionFromValue ir sourceRelation
+            objectExpressionFromValue dataFrameApi ir sourceRelation
                 |> Result.andThen
                     (\source ->
-                        namedExpressionsFromValue ir mappingFunction
+                        namedExpressionsFromValue dataFrameApi ir mappingFunction
                             |> Result.map (\expr -> Select expr source)
                     )
 
         Value.Apply _ (Value.Apply _ (Value.Apply _ (Value.Reference _ ( [ [ "morphir" ], [ "s", "d", "k" ] ], [ [ "list" ] ], [ "innerJoin" ] )) joinedRelation) onClause) baseRelation ->
-            buildJoin ir Inner baseRelation joinedRelation onClause
+            buildJoin dataFrameApi ir Inner baseRelation joinedRelation onClause
 
         Value.Apply _ (Value.Apply _ (Value.Apply _ (Value.Reference _ ( [ [ "morphir" ], [ "s", "d", "k" ] ], [ [ "list" ] ], [ "leftJoin" ] )) joinedRelation) onClause) baseRelation ->
-            buildJoin ir Left baseRelation joinedRelation onClause
+            buildJoin dataFrameApi ir Left baseRelation joinedRelation onClause
 
         Value.LetDefinition _ _ _ _ ->
             inlineLetDef [] [] morphirValue
-                |> objectExpressionFromValue ir
+                |> objectExpressionFromValue dataFrameApi ir
 
         Value.Apply _ (Value.Reference _ applyFuncName) sourceRelation ->
-            objectExpressionFromValue ir sourceRelation
+            objectExpressionFromValue dataFrameApi ir sourceRelation
                 |> Result.andThen (appendFunctionToSelect applyFuncName)
 
         Value.Apply applyType ( Value.Lambda lamType lamArgs ( Value.List _ [ (Value.Record _ _ ) as record ] ) ) sourceRelation ->
             Value.Apply applyType ( Value.Lambda lamType lamArgs record) sourceRelation
-                |> objectExpressionFromValue ir
+                |> objectExpressionFromValue dataFrameApi ir
 
         Value.Apply _ ((Value.Lambda _ _ (Value.Record ta relations) ) as lam) sourceRelation ->
             relations
@@ -405,23 +369,23 @@ objectExpressionFromValue ir morphirValue =
                     )
                 |> Dict.fromList
                 |> Value.Record ta
-                |> objectExpressionFromValue ir
+                |> objectExpressionFromValue dataFrameApi ir
 
         Value.Record _ relations ->
             relations
                 |> Dict.toList
                 |> List.map
                     (\( name, value ) ->
-                        objectExpressionFromValue ir value
+                        objectExpressionFromValue dataFrameApi ir value
                             |> Result.andThen (substituteOnlyFieldName name)
                     )
                 |> ResultList.keepFirstError
-                |> Result.andThen mergeSelects
+                |> Result.andThen (mergeSelects dataFrameApi)
 
         Value.Apply _ (Value.Lambda _ (Value.AsPattern _ (WildcardPattern _) label) body) sourceRelation ->
             -- Attempt to inline simple lambdas to see if that makes it readable before erroring
             inlineArguments [label] [sourceRelation] body
-                |> objectExpressionFromValue ir
+                |> objectExpressionFromValue dataFrameApi ir
 
         other ->
             let
@@ -431,34 +395,34 @@ objectExpressionFromValue ir morphirValue =
             Err (UnhandledValue other)
 
 
-buildJoin : IR -> JoinType -> TypedValue -> TypedValue -> TypedValue -> Result Error ObjectExpression
-buildJoin ir joinType baseRelation joinedRelation onClause =
+buildJoin : DataFrameApi -> IR -> JoinType -> TypedValue -> TypedValue -> TypedValue -> Result Error ObjectExpression
+buildJoin dataFrameApi ir joinType baseRelation joinedRelation onClause =
     Result.map3 (Join joinType)
-        (objectExpressionFromValue ir baseRelation)
-        (objectExpressionFromValue ir joinedRelation)
-        (expressionFromValue ir onClause)
+        (objectExpressionFromValue dataFrameApi ir baseRelation)
+        (objectExpressionFromValue dataFrameApi ir joinedRelation)
+        (expressionFromValue dataFrameApi ir onClause)
 
 
-namedExpressionsFromFields : IR -> Dict Name TypedValue -> Result Error NamedExpressions
-namedExpressionsFromFields ir fields =
+namedExpressionsFromFields : DataFrameApi -> IR -> Dict Name TypedValue -> Result Error NamedExpressions
+namedExpressionsFromFields dataFrameApi ir fields =
     fields
         |> Dict.toList
         |> List.map
             (\( name, value ) ->
-                expressionFromValue ir value
+                expressionFromValue dataFrameApi ir value
                     |> Result.map (Tuple.pair name)
             )
         |> ResultList.keepFirstError
 
 
-objectExpressionFromAggregationCall : IR -> AggregationCall -> Result Error ObjectExpression
-objectExpressionFromAggregationCall ir aggregationCall =
+objectExpressionFromAggregationCall : DataFrameApi -> IR -> AggregationCall -> Result Error ObjectExpression
+objectExpressionFromAggregationCall dataFrameApi ir aggregationCall =
     let
         spliceFilterIntoFunction : Expression -> Expression -> Result Error Expression
         spliceFilterIntoFunction filterExpr function =
             case function of
                 Function funcName [funcArg] ->
-                    Function funcName [Function "when" [filterExpr, funcArg] ] |> Ok
+                    Function funcName [dataFrameApi.whenExpression [filterExpr, funcArg] ] |> Ok
                 other ->
                     UnhandledExpression other |> Err
 
@@ -472,14 +436,14 @@ objectExpressionFromAggregationCall ir aggregationCall =
                                 |> Maybe.map List.singleton
                                 |> Maybe.withDefault []
                         aggExpr =
-                            mapSDKFunctions ir aggArgs aggName
+                            mapSDKFunctions dataFrameApi ir aggArgs aggName
 
                     in
                     case filterFunc of
                         Just filt ->
                             Result.map2
                                 spliceFilterIntoFunction
-                                (expressionFromValue ir filt)
+                                (expressionFromValue dataFrameApi ir filt)
                                 (aggExpr)
                             |> Result.andThen (Result.map (Tuple.pair fieldName))
                         Nothing ->
@@ -496,22 +460,22 @@ objectExpressionFromAggregationCall ir aggregationCall =
                     |> List.map namedExpressionFromAggValue
                     |> ResultList.keepFirstError
                 )
-                (objectExpressionFromValue ir sourceRelation)
+                (objectExpressionFromValue dataFrameApi ir sourceRelation)
 
 
 {-| Provides a way to create NamedExpressions from a Morphir Value.
 -}
-namedExpressionsFromValue : IR -> TypedValue -> Result Error NamedExpressions
-namedExpressionsFromValue ir typedValue =
+namedExpressionsFromValue : DataFrameApi -> IR -> TypedValue -> Result Error NamedExpressions
+namedExpressionsFromValue dataFrameApi ir typedValue =
     case typedValue of
         Value.Lambda _ _ (Value.List _ [ Value.Record _ fields ]) ->
-            namedExpressionsFromFields ir fields
+            namedExpressionsFromFields dataFrameApi ir fields
 
         Value.Lambda _ _ (Value.Record _ fields) ->
-            namedExpressionsFromFields ir fields
+            namedExpressionsFromFields dataFrameApi ir fields
 
         Value.FieldFunction _ name ->
-            expressionFromValue ir typedValue
+            expressionFromValue dataFrameApi ir typedValue
                 |> Result.map (Tuple.pair name >> List.singleton)
 
         _ ->
@@ -545,8 +509,8 @@ replaceLambdaArg replacementValue lam =
             UnhandledValue other |> Err
 
 
-constructWhenEqualsOtherwise : IR -> TypedValue -> List ( Pattern (Type.Type ()), TypedValue ) -> TypedValue -> Expression -> Result Error Expression
-constructWhenEqualsOtherwise ir thenValue remainingCases leftValue rightExpr =
+constructWhenEqualsOtherwise : DataFrameApi -> IR -> TypedValue -> List ( Pattern (Type.Type ()), TypedValue ) -> TypedValue -> Expression -> Result Error Expression
+constructWhenEqualsOtherwise dataFrameApi ir thenValue remainingCases leftValue rightExpr =
     Result.map3
         (\leftExpr thenExpr otherwiseExpr ->
             WhenOtherwise
@@ -554,22 +518,22 @@ constructWhenEqualsOtherwise ir thenValue remainingCases leftValue rightExpr =
                 thenExpr
                 otherwiseExpr
         )
-        (expressionFromValue ir leftValue)
-        (expressionFromValue ir thenValue)
-        (mapPatterns ir leftValue remainingCases)
+        (expressionFromValue dataFrameApi ir leftValue)
+        (expressionFromValue dataFrameApi ir thenValue)
+        (mapPatterns dataFrameApi ir leftValue remainingCases)
 
 
 {-| Transforms a list of pattern,value tuples into Expressions
 -}
-mapPatterns : IR -> TypedValue -> List ( Pattern (Type.Type ()), TypedValue ) -> Result Error Expression
-mapPatterns ir onValue cases =
+mapPatterns : DataFrameApi -> IR -> TypedValue -> List ( Pattern (Type.Type ()), TypedValue ) -> Result Error Expression
+mapPatterns dataFrameApi ir onValue cases =
     case cases of
         [] ->
             EmptyPatternMatch |> Err
 
         ( LiteralPattern _ lit, thenValue ) :: remainingCases ->
             Literal lit
-                |> constructWhenEqualsOtherwise ir thenValue remainingCases onValue
+                |> constructWhenEqualsOtherwise dataFrameApi ir thenValue remainingCases onValue
 
         ( ConstructorPattern va fqn [], thenValue ) :: remainingCases ->
             -- e.g. 'Bar'. Note, 'Just Bar' would require the third arg to not be an empty list.
@@ -578,10 +542,10 @@ mapPatterns ir onValue cases =
                 |> Name.toTitleCase
                 |> StringLiteral
                 |> Literal
-                |> constructWhenEqualsOtherwise ir thenValue remainingCases onValue
+                |> constructWhenEqualsOtherwise dataFrameApi ir thenValue remainingCases onValue
 
         [ ( WildcardPattern _, thenValue ) ] ->
-            expressionFromValue ir thenValue
+            expressionFromValue dataFrameApi ir thenValue
 
         ( otherPattern, otherValue ) :: _ ->
             UnhandledPatternMatch ( otherPattern, otherValue ) |> Err
@@ -591,8 +555,8 @@ mapPatterns ir onValue cases =
 This is where support for various column expression is added. This function fails to produce an Expression
 when it encounters a value that is not supported.
 -}
-expressionFromValue : IR -> TypedValue -> Result Error Expression
-expressionFromValue ir morphirValue =
+expressionFromValue : DataFrameApi -> IR -> TypedValue -> Result Error Expression
+expressionFromValue dataFrameApi ir morphirValue =
     case morphirValue of
         Value.Literal _ literal ->
             Literal literal |> Ok
@@ -607,7 +571,7 @@ expressionFromValue ir morphirValue =
             Name.toCamelCase name |> Column |> Ok
 
         Value.Lambda _ _ body ->
-            expressionFromValue ir body
+            expressionFromValue dataFrameApi ir body
 
         Value.Apply _ _ _ ->
             case morphirValue of
@@ -615,49 +579,49 @@ expressionFromValue ir morphirValue =
                     -- `value |> Maybe.map thenValue |> Maybe.withDefault elseValue` becomes `when(not(isnull(value)), thenValue).otherwise(elseValue)`
                     Result.map3
                         (\sourceExpr thenExpr elseExpr ->
-                            WhenOtherwise (Function "not" [ Function "isnull" [ sourceExpr ] ]) thenExpr elseExpr
+                            WhenOtherwise (Function "not" [ dataFrameApi.isNullFunction [ sourceExpr ] ]) thenExpr elseExpr
                         )
-                        (expressionFromValue ir sourceValue)
+                        (expressionFromValue dataFrameApi ir sourceValue)
                         (thenValue
                             |> replaceLambdaArg sourceValue
-                            |> Result.andThen (expressionFromValue ir)
+                            |> Result.andThen (expressionFromValue dataFrameApi  ir)
                         )
-                        (expressionFromValue ir elseValue)
+                        (expressionFromValue dataFrameApi ir elseValue)
 
                 Value.Apply _ (Value.Literal (Type.Function _ _ (Type.Reference _ ( [ [ "morphir" ], [ "s", "d", "k" ] ], [ [ "maybe" ] ], [ "maybe" ] ) _)) (StringLiteral "Just")) arg ->
                     -- `Just arg` becomes `arg` if `Just` was a Maybe.
-                    expressionFromValue ir arg
+                    expressionFromValue dataFrameApi ir arg
 
                 Value.Apply _ (Value.Apply _ (Value.Reference _ ( [ [ "morphir" ], [ "s", "d", "k" ] ], [ [ "basics" ] ], [ "not", "equal" ] )) arg) (Value.Literal (Type.Reference _ ( [ [ "morphir" ], [ "s", "d", "k" ] ], [ [ "maybe" ] ], [ "maybe" ] ) _) (StringLiteral "Nothing")) ->
                     -- `arg /= Nothing` becomes `not(isnull(arg))` if `Nothing` was a Maybe.
-                    expressionFromValue ir arg
-                        |> Result.map (\expr -> Function "not" [ Function "isnull" [ expr ] ])
+                    expressionFromValue dataFrameApi ir arg
+                        |> Result.map (\expr -> Function "not" [ dataFrameApi.isNullFunction [ expr ] ])
 
                 Value.Apply _ (Value.Apply _ (Value.Reference _ ( [ [ "morphir" ], [ "s", "d", "k" ] ], [ [ "basics" ] ], [ "equal" ] )) arg) (Value.Literal (Type.Reference _ ( [ [ "morphir" ], [ "s", "d", "k" ] ], [ [ "maybe" ] ], [ "maybe" ] ) _) (StringLiteral "Nothing")) ->
                     -- `arg == Nothing` becomes `isnull(arg)` if `Nothing` was a Maybe.
-                    expressionFromValue ir arg
-                        |> Result.map (\expr -> Function "isnull" [ expr ])
+                    expressionFromValue dataFrameApi ir arg
+                        |> Result.map (\expr -> dataFrameApi.isNullFunction [ expr ])
 
                 _ ->
                     collectArgValues morphirValue []
-                        |> (\( args, applyTarget ) -> mapApply ir args applyTarget)
+                        |> (\( args, applyTarget ) -> mapApply dataFrameApi ir args applyTarget)
 
         Value.Reference _ _ ->
-            mapApply ir [] morphirValue
+            mapApply dataFrameApi ir [] morphirValue
 
         Value.IfThenElse _ cond thenBranch elseBranch ->
             Result.map3
                 WhenOtherwise
-                (expressionFromValue ir cond)
-                (expressionFromValue ir thenBranch)
-                (expressionFromValue ir elseBranch)
+                (expressionFromValue dataFrameApi ir cond)
+                (expressionFromValue dataFrameApi ir thenBranch)
+                (expressionFromValue dataFrameApi ir elseBranch)
 
         Value.LetDefinition _ _ _ _ ->
             inlineLetDef [] [] morphirValue
-                |> expressionFromValue ir
+                |> expressionFromValue dataFrameApi ir
 
         Value.PatternMatch _ onValue cases ->
-            mapPatterns ir onValue cases
+            mapPatterns dataFrameApi ir onValue cases
 
         other ->
             UnhandledValue other |> Err
@@ -740,8 +704,8 @@ param variables with the arguments. If the `target` is a lambda, it first attemp
 the lambda body and rewrite any enclosed variables and then repeats the process for
 the lambda's params.
 -}
-mapApply : IR -> List TypedValue -> TypedValue -> Result Error Expression
-mapApply ir args target =
+mapApply : DataFrameApi -> IR -> List TypedValue -> TypedValue -> Result Error Expression
+mapApply dataFrameApi ir args target =
     case target of
         Value.Reference _ (( pkgName, modName, _ ) as fqn) ->
             case IR.lookupValueDefinition fqn ir of
@@ -750,7 +714,7 @@ mapApply ir args target =
                         (List.map (\( n, _, _ ) -> n) def.inputTypes)
                         args
                         def.body
-                        |> expressionFromValue ir
+                        |> expressionFromValue dataFrameApi ir
 
                 Nothing ->
                     case ( ( pkgName, modName ), args ) of
@@ -758,18 +722,18 @@ mapApply ir args target =
                             Result.map3
                                 BinaryOperation
                                 (binaryOpString fqn)
-                                (expressionFromValue ir left)
-                                (expressionFromValue ir right)
+                                (expressionFromValue dataFrameApi ir left)
+                                (expressionFromValue dataFrameApi ir right)
 
                         _ ->
-                            mapSDKFunctions ir args fqn
+                            mapSDKFunctions dataFrameApi ir args fqn
 
         Value.Lambda _ _ body ->
             inlineArguments
                 (collectLambdaParams target [])
                 args
                 body
-                |> expressionFromValue ir
+                |> expressionFromValue dataFrameApi ir
 
         _ ->
             UnhandledValue target |> Err
@@ -870,26 +834,26 @@ fQNameToPartialSparkFunction fQName =
             FunctionNotFound fQName |> Err
 
 
-mapSDKFunctions : IR -> List TypedValue -> FQName -> Result Error Expression
-mapSDKFunctions ir args fQName =
+mapSDKFunctions : DataFrameApi ->IR -> List TypedValue -> FQName -> Result Error Expression
+mapSDKFunctions dataFrameApi ir args fQName =
     case ( FQName.toString fQName, args ) of
         ( "Morphir.SDK:String:replace", pattern :: replacement :: target :: [] ) ->
             Result.map2
                 (\partialFunc exprArgs -> partialFunc exprArgs)
                 (fQNameToPartialSparkFunction fQName)
                 ([ target, pattern, replacement ]
-                    |> List.map (expressionFromValue ir)
+                    |> List.map (expressionFromValue dataFrameApi ir)
                     |> ResultList.keepFirstError
                 )
 
         ( "Morphir.SDK:List:member", item :: (Value.List _ list) :: [] ) ->
             Result.map2
                 (\itemExpr listExpr ->
-                    Method itemExpr "isin" listExpr
+                    dataFrameApi.isInMethod itemExpr  listExpr
                 )
-                (expressionFromValue ir item)
+                (expressionFromValue dataFrameApi ir item)
                 (list
-                    |> List.map (expressionFromValue ir)
+                    |> List.map (expressionFromValue dataFrameApi ir)
                     |> ResultList.keepFirstError
                 )
 
@@ -902,7 +866,7 @@ mapSDKFunctions ir args fQName =
                 (\partialFunc exprArgs -> partialFunc exprArgs)
                 (fQNameToPartialSparkFunction fQName)
                 (args
-                    |> List.map (expressionFromValue ir)
+                    |> List.map (expressionFromValue dataFrameApi ir)
                     |> ResultList.keepFirstError
                 )
 
