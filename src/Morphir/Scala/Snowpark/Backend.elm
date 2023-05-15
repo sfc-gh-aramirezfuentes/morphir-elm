@@ -3,28 +3,21 @@ module Morphir.Scala.Snowpark.Backend exposing (..)
 import Dict exposing (Dict)
 import Morphir.File.FileMap exposing (FileMap)
 import Morphir.IR as IR exposing (IR)
-import Morphir.IR.AccessControlled as AccessControlled exposing (Access(..), AccessControlled)
 import Morphir.IR.Distribution as Distribution exposing (Distribution)
-import Morphir.IR.Documented as Documented exposing (Documented)
-import Morphir.IR.FQName as FQName exposing (FQName)
 import Morphir.IR.Literal exposing (Literal(..))
-import Morphir.IR.Module as Module exposing (ModuleName)
 import Morphir.IR.Name as Name exposing (Name)
-import Morphir.IR.Type as Type exposing (Type)
-import Morphir.IR.Value as Value exposing (TypedValue, Value)
-import Morphir.SDK.ResultList as ResultList
 import Morphir.Scala.AST as Scala
-import Morphir.Scala.Common as ScalaBackend
-import Morphir.Scala.Feature.Core as ScalaBackend
 import Morphir.Scala.PrettyPrinter as PrettyPrinter
-import Morphir.Spark.API as Spark
-import Morphir.Spark.AST as SparkAST exposing (..)
 import Morphir.Spark.Backend as SparkBackend
 import Morphir.Scala.Snowpark.API as Snowpark
 
+-- Define a record that could be used as argument in the CLI
 type alias Options =
     {}
-
+    
+{-| Entry point for the Snowpark backend. It takes the Morphir IR as the input and returns an in-memory
+representation of files generated.
+-}
 mapDistribution : Options -> Distribution -> FileMap
 mapDistribution _ distro =
     let

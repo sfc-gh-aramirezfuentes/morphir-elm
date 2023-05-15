@@ -64,6 +64,7 @@ decodeOptions gen =
 
         Ok "Snowpark" ->
             Decode.map SnowparkOptions (Decode.succeed Morphir.Scala.Snowpark.Backend.Options)
+            
         _ ->
             Decode.map (\options -> ScalaOptions options) Morphir.Scala.Backend.Codec.decodeOptions
 
