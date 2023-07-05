@@ -1,0 +1,18 @@
+# point_of_contact: the owner of this repository, can be a github user or github team
+point_of_contact: sfc-gh-aramirezfuentes
+
+# production: Whether this repository meets the criteria for being "production"
+production: false
+
+# distributed: whether any source code in this repository is distributed directly to customers
+distributed: false
+
+# modifed: wheter any open source dependecies in this repository have been modified
+modifed: true
+
+release_branches: list of release branc patterns, exact matches or regex is accetable
+release_branches:
+  - main
+
+# type of application
+type: transpiler-tool
